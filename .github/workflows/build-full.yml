@@ -26,16 +26,18 @@ jobs:
       - name: Clone kernel source
         run: |
           set -ex
-          # 先打印可用分支，确认后再改 -b
-          git ls-remote --heads https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git | grep -i umi || true
+          BRANCH="umi-q-oss"
           for i in 1 2 3; do
-            git clone --depth=1 \
-              -b 这里换成确认存在的真实分支 \
-              https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel && break
+            git clone --depth=1 -b "$BRANCH" \
+              https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel \
+              && break
             echo "clone retry $i"
             sleep 5
           done
           test -d kernel
+          # 打印可用 defconfig，确认真实文件名
+          ls -l kernel/arch/arm64/configs/
+          ls -l kernel/arch/arm64/configs/vendor/ || true
 
       - name: Add SukiSU builtin
         run: |
@@ -49,15 +51,19 @@ jobs:
         run: |
           set -ex
           cd kernel
-          echo "CONFIG_KPM=y" >> arch/arm64/configs/umi_defconfig
-          echo "CONFIG_KALLSYMS=y" >> arch/arm64/configs/umi_defconfig
-          echo "CONFIG_KALLSYMS_ALL=y" >> arch/arm64/configs/umi_defconfig
+          # 先看上面 ls 出来的真实文件，必要时改这里
+          DEFCONFIG="arch/arm64/configs/vendor/kona_defconfig"
+          [ -f "$DEFCONFIG" ] || DEFCONFIG="arch/arm64/configs/umi_defconfig"
+          echo "CONFIG_KPM=y" >> "$DEFCONFIG"
+          echo "CONFIG_KALLSYMS=y" >> "$DEFCONFIG"
+          echo "CONFIG_KALLSYMS_ALL=y" >> "$DEFCONFIG"
 
       - name: Build kernel
         run: |
           set -ex
           cd kernel
-          make ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" umi_defconfig
+          # 同样以实际 defconfig 为准
+          make ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" kona_defconfig
           make ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" -j$(nproc)
 
       - name: Pack AnyKernel3
