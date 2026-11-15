@@ -24,7 +24,7 @@ jobs:
             git build-essential bc bison flex \
             libssl-dev libelf-dev \
             linux-libc-dev libc6-dev \
-            python3 curl wget zip unzip \
+            python3 python3-pip curl wget zip unzip \
             ccache make \
             gcc-9 g++-9 \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
@@ -39,16 +39,11 @@ jobs:
           mkdir -p "$HOME/toolchains"
           cd "$HOME/toolchains"
           CLANG_DIR="$HOME/toolchains/proton-clang"
-
           if [ ! -x "$CLANG_DIR/bin/clang" ]; then
-            wget -q --tries=3 --timeout=120 -O proton.tar.gz \
-              "https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.tar.gz"
-            if [ -s proton.tar.gz ]; then
-              mkdir -p "$CLANG_DIR"
-              tar -xzf proton.tar.gz -C "$CLANG_DIR" --strip-components=1
-            fi
+            rm -rf "$CLANG_DIR"
+            git clone --depth=1 \
+              https://github.com/kdrag0n/proton-clang.git "$CLANG_DIR"
           fi
-
           if [ -x "$CLANG_DIR/bin/clang" ]; then
             echo "CLANG_DIR=$CLANG_DIR" >> "$GITHUB_ENV"
             echo "USE_CLANG=1" >> "$GITHUB_ENV"
@@ -61,7 +56,6 @@ jobs:
           set -ex
           BRANCH="umi-q-oss"
           rm -rf kernel
-
           for i in 1 2 3; do
             git clone --depth=1 -b "$BRANCH" \
               https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel \
@@ -70,10 +64,10 @@ jobs:
             rm -rf kernel
             sleep 8
           done
-
           test -d kernel
           cd kernel
-          find arch/arm64/configs -type f | sort
+          find . -type f \
+            \( -iname "*umi*defconfig*" -o -iname "*kona*defconfig*" \) | sort
 
       - name: Apply SukiSU Ultra
         run: |
@@ -83,6 +77,28 @@ jobs:
             "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
             | bash -s builtin
 
+      - name: Fix gcc-wrapper after SukiSU
+        run: |
+          set -ex
+          cd kernel
+
+          # Disable wrapper references; allow leading spaces
+          find . -type f \
+            \( -name "Makefile" -o -name "*.mk" \) -print0 \
+            | while IFS= read -r -d '' f; do
+                sed -i \
+                  -e 's/\(GCC_WRAPPER[[:space:]]*:=[[:space:]]*\).*/\1/' \
+                  -e 's/\(GCC_WRAPPER[[:space:]]*=[[:space:]]*\).*/\1/' \
+                  "$f" || true
+              done
+
+          # Python3 compatible passthrough
+          mkdir -p scripts
+          echo "IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwppbXBvcnQgc3lzCmltcG9ydCBzdWJwcm9jZXNzCgpkZWYgbWFpbigpOgogICAgaWYgbGVuKHN5cy5hcmd2KSA8IDI6CiAgICAgICAgcmV0dXJuIDAKICAgIHJldHVybiBzdWJwcm9jZXNzLmNhbGwoc3lzLmFyZ3ZbMTpdKQoKaWYgX19uYW1lX18gPT0gIl9fbWFpbl9fIjoKICAgIHN5cy5leGl0KG1haW4oKSkK" \
+            | base64 -d > scripts/gcc-wrapper.py
+          chmod +x scripts/gcc-wrapper.py
+          python3 -m py_compile scripts/gcc-wrapper.py
+
       - name: Prepare Defconfig
         id: defcfg
         run: |
@@ -90,30 +106,24 @@ jobs:
           cd kernel
           make mrproper || true
 
-          CFG_ROOT="arch/arm64/configs"
           PICK=""
-
-          for KEY in umi kona cmi; do
-            PICK="$(find "$CFG_ROOT" -type f -iname "*${KEY}*defconfig*" | head -n1)"
+          for KEY in umi_user umi kona cmi; do
+            PICK="$(find . -type f -iname "*${KEY}*defconfig*" | head -n1)"
             [ -n "$PICK" ] && break
           done
-
-          if [ -z "$PICK" ]; then
-            PICK="$(find "$CFG_ROOT" -type f -iname "*defconfig*" | head -n1)"
-          fi
-
+          [ -z "$PICK" ] && PICK="$(find . -type f -iname "*defconfig*" | head -n1)"
           test -n "$PICK"
 
-          REAL_SRC="$(readlink -f "$PICK")"
-          BASE="$(basename "$PICK")"
-          DST="$CFG_ROOT/$BASE"
-          REAL_DST="$(readlink -f "$DST" 2>/dev/null || true)"
-
-          if [ "$REAL_SRC" != "$REAL_DST" ]; then
-            cp -f "$PICK" "$DST"
-            MAKE_TARGET="$BASE"
-          else
-            MAKE_TARGET="$(realpath --relative-to="$CFG_ROOT" "$PICK")"
+          MAKE_TARGET="$PICK"
+          if echo "$PICK" | grep -q "arch/arm64/configs/"; then
+            BASE="$(basename "$PICK")"
+            DST="arch/arm64/configs/$BASE"
+            REAL_SRC="$(readlink -f "$PICK")"
+            REAL_DST="$(readlink -f "$DST" 2>/dev/null || true)"
+            if [ "$REAL_SRC" != "$REAL_DST" ]; then
+              cp -f "$PICK" "$DST"
+              MAKE_TARGET="$BASE"
+            fi
           fi
 
           echo "PICKED: $PICK"
@@ -154,12 +164,13 @@ jobs:
               --enable KPROBE_EVENTS \
               --enable KALLSYMS \
               --enable KALLSYMS_ALL \
+              --enable EXT4_FS \
               --enable FUNCTION_TRACER \
               --enable DYNAMIC_FTRACE
           fi
 
           make olddefconfig
-          make -j"$(nproc)" KCFLAGS="-Wno-error"
+          make -j"$(nproc)"
 
       - name: Pack AnyKernel3
         run: |
@@ -177,7 +188,6 @@ jobs:
             arch/arm64/boot/Image; do
             [ -f "$f" ] && IMAGE="$f" && break
           done
-
           test -n "$IMAGE"
           cp "$IMAGE" ../ak3/
 
