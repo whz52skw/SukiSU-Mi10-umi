@@ -33,6 +33,7 @@ jobs:
           set -ex
           BRANCH="umi-q-oss"
           for i in 1 2 3; do
+            rm -rf kernel
             git clone --depth=1 -b "$BRANCH" \
               https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel \
               && break
@@ -40,7 +41,11 @@ jobs:
             sleep 5
           done
           test -d kernel
-          find kernel/arch/arm64/configs -maxdepth 2 -type f | sort
+
+          cd kernel
+          echo "===== ALL DEFCONFIG FILES ====="
+          find arch/arm64 -type f \( -iname "*defconfig*" \) | sort
+          echo "================================"
 
       - name: Add SukiSU builtin
         run: |
@@ -50,53 +55,80 @@ jobs:
             "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
             | bash -s builtin
 
-      - name: Fix gcc-wrapper and Makefile
+      - name: Fix gcc-wrapper (Python3)
         run: |
           set -ex
           cd kernel
 
-          # 1) 备份后重写为直通转发，避免 py2 print；同时保留原文件
           if [ -f scripts/gcc-wrapper.py ]; then
             cp scripts/gcc-wrapper.py scripts/gcc-wrapper.py.orig
             cat > scripts/gcc-wrapper.py <<'PY'
           #!/usr/bin/env python3
           import sys, subprocess
-          args = sys.argv[1:]
-          sys.exit(subprocess.call(args))
+          sys.exit(subprocess.call(sys.argv[1:]))
           PY
             chmod +x scripts/gcc-wrapper.py
           fi
 
-          # 2) 扫描并注释掉强制把 CC 指向 wrapper 的地方
-          grep -RIn "gcc-wrapper.py" Makefile scripts 2>/dev/null || true
-          sed -i \
-            -e 's|^\(.*gcc-wrapper\.py.*\)|# \1|' \
-            Makefile 2>/dev/null || true
-          find scripts -maxdepth 3 -name "Makefile*" -print0 \
-            | while IFS= read -r -d '' f; do
-                sed -i \
-                  -e 's|^\(.*gcc-wrapper\.py.*\)|# \1|' \
-                  "$f"
-              done
-
-      - name: Patch defconfig
+      - name: Detect & prepare defconfig
         run: |
           set -ex
           cd kernel
 
-          if [ -f arch/arm64/configs/vendor/kona_defconfig ]; then
-            DEFCONFIG="arch/arm64/configs/vendor/kona_defconfig"
-          elif [ -f arch/arm64/configs/kona_defconfig ]; then
-            DEFCONFIG="arch/arm64/configs/kona_defconfig"
-          else
-            DEFCONFIG="arch/arm64/configs/umi_defconfig"
+          make mrproper || true
+
+          CFG_DIR="arch/arm64/configs"
+          mkdir -p "$CFG_DIR"
+
+          # 全部候选
+          mapfile -t FILES < <(find arch/arm64 -type f -iname "*defconfig*" | sort)
+          printf "Candidates:\n"
+          printf "%s\n" "${FILES[@]}"
+
+          # 优先级：umi -> cmi -> kona -> qcom -> 其它
+          PICK=""
+          for kw in umi cmi kona qcom; do
+            for f in "${FILES[@]}"; do
+              if echo "$f" | grep -qi "$kw"; then
+                PICK="$f"
+                break
+              fi
+            done
+            [ -n "$PICK" ] && break
+          done
+
+          # 兜底：取第一个
+          if [ -z "$PICK" ] && [ ${#FILES[@]} -gt 0 ]; then
+            PICK="${FILES[0]}"
           fi
 
-          echo "USE DEFCONFIG: $DEFCONFIG"
-          test -f "$DEFCONFIG"
-          echo "CONFIG_KPM=y" >> "$DEFCONFIG"
-          echo "CONFIG_KALLSYMS=y" >> "$DEFCONFIG"
-          echo "CONFIG_KALLSYMS_ALL=y" >> "$DEFCONFIG"
+          if [ -z "$PICK" ]; then
+            echo "ERROR: no defconfig found"
+            exit 1
+          fi
+
+          BASENAME="$(basename "$PICK")"
+
+          # vendor / 子目录：复制到 configs 根，兼容老 Makefile
+          if [ "$(dirname "$PICK")" != "$CFG_DIR" ]; then
+            cp -f "$PICK" "$CFG_DIR/$BASENAME"
+          fi
+
+          # 去掉后缀，得到 make 目标
+          TARGET="${BASENAME%.defconfig}_defconfig"
+          if [ "$BASENAME" = "defconfig" ]; then
+            TARGET="defconfig"
+          fi
+
+          echo "SELECTED FILE : $PICK"
+          echo "MAKE TARGET   : $TARGET"
+          echo "DEFCONFIG_TARGET=$TARGET" >> "$GITHUB_ENV"
+
+          # 追加常用项（重复也无妨，后面 olddefconfig 收敛）
+          MAIN_CFG="$CFG_DIR/$BASENAME"
+          echo "CONFIG_KPM=y" >> "$MAIN_CFG"
+          echo "CONFIG_KALLSYMS=y" >> "$MAIN_CFG"
+          echo "CONFIG_KALLSYMS_ALL=y" >> "$MAIN_CFG"
 
       - name: Build kernel
         run: |
@@ -105,20 +137,14 @@ jobs:
 
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          # 目标编译器：ccache + 交叉 gcc；主机编译器单独给 HOSTCC
           export CC="ccache aarch64-linux-gnu-gcc"
           export HOSTCC=gcc-9
           export HOSTCXX=g++-9
 
-          if [ -f arch/arm64/configs/vendor/kona_defconfig ]; then
-            make kona_defconfig
-          elif [ -f arch/arm64/configs/kona_defconfig ]; then
-            make kona_defconfig
-          else
-            make umi_defconfig
-          fi
-
-          make -j$(nproc)
+          echo "Building with: $DEFCONFIG_TARGET"
+          make "$DEFCONFIG_TARGET"
+          make olddefconfig
+          make -j"$(nproc)"
 
       - name: Pack AnyKernel3
         run: |
