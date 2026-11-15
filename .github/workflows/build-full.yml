@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 240
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,9 +19,14 @@ jobs:
           sudo apt update
           sudo apt install -y \
             git build-essential bc bison flex \
-            libssl-dev libelf-dev python3 curl zip unzip \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu ccache
+            libssl-dev libelf-dev python3 python3-pip \
+            curl zip unzip ccache \
+            gcc-9 g++-9 \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu
           ccache -M 5G
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 100 || true
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 100 || true
 
       - name: Clone kernel source
         run: |
@@ -35,7 +40,6 @@ jobs:
             sleep 5
           done
           test -d kernel
-          # 打印可用 defconfig，确认真实文件名
           ls -l kernel/arch/arm64/configs/
           ls -l kernel/arch/arm64/configs/vendor/ || true
 
@@ -47,31 +51,67 @@ jobs:
             "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
             | bash -s builtin
 
+      - name: Fix Python2 gcc-wrapper
+        run: |
+          set -ex
+          cd kernel
+          if [ -f scripts/gcc-wrapper.py ]; then
+            # 直接禁用 wrapper，避免 py2 报错；备选也可手动把 print 补括号
+            mv scripts/gcc-wrapper.py scripts/gcc-wrapper.py.bak || true
+          fi
+
       - name: Patch defconfig
         run: |
           set -ex
           cd kernel
-          # 先看上面 ls 出来的真实文件，必要时改这里
-          DEFCONFIG="arch/arm64/configs/vendor/kona_defconfig"
-          [ -f "$DEFCONFIG" ] || DEFCONFIG="arch/arm64/configs/umi_defconfig"
+          if [ -f arch/arm64/configs/vendor/kona_defconfig ]; then
+            DEFCONFIG="arch/arm64/configs/vendor/kona_defconfig"
+          else
+            DEFCONFIG="arch/arm64/configs/umi_defconfig"
+          fi
           echo "CONFIG_KPM=y" >> "$DEFCONFIG"
           echo "CONFIG_KALLSYMS=y" >> "$DEFCONFIG"
           echo "CONFIG_KALLSYMS_ALL=y" >> "$DEFCONFIG"
+          echo "USE KONA DEFCONFIG: $DEFCONFIG"
 
       - name: Build kernel
         run: |
           set -ex
           cd kernel
-          # 同样以实际 defconfig 为准
-          make ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" kona_defconfig
-          make ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" -j$(nproc)
+
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CC="ccache gcc"
+          export HOSTCC=gcc-9
+
+          if [ -f arch/arm64/configs/vendor/kona_defconfig ]; then
+            make kona_defconfig
+          else
+            make umi_defconfig
+          fi
+
+          make -j$(nproc)
 
       - name: Pack AnyKernel3
         run: |
           set -ex
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
-          cp kernel/arch/arm64/boot/Image.gz-dtb ak3/
-          cd ak3
+
+          cd kernel
+          IMAGE=""
+          for f in \
+            arch/arm64/boot/Image.gz-dtb \
+            arch/arm64/boot/Image.gz \
+            arch/arm64/boot/Image; do
+            if [ -f "$f" ]; then
+              IMAGE="$f"
+              break
+            fi
+          done
+          test -n "$IMAGE"
+          cp "$IMAGE" ../ak3/
+
+          cd ../ak3
           sed -i "s/device.name1=.*/device.name1=umi/" anykernel.sh
           sed -i "s/device.name2=.*/device.name2=Mi 10/" anykernel.sh
           sed -i "s/is_slot_device=.*/is_slot_device=1/" anykernel.sh
