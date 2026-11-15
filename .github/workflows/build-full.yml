@@ -1,4 +1,4 @@
-name: Mi10-umi SukiSU 全量内核编译
+name: Mi10-umi SukiSU Kernel Build
 on:
   workflow_dispatch:
   push:
@@ -8,29 +8,29 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 挂载编译缓存（二次编译提速60%+）
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          key: ccache-umi-android13-full-${{ github.run_id }}
-          restore-keys: |
-            ccache-umi-android13-full-
-
-      - name: 安装完整编译依赖
+      - name: Install build dependencies
         run: |
           sudo apt update
           sudo apt install -y git build-essential bc bison flex libssl-dev libelf-dev python3 curl zip unzip gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu ccache
           ccache -M 5G
 
-      - name: 拉取小米10 Android13 官方内核源码
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-umi-android13-${{ github.run_id }}
+          restore-keys: |
+            ccache-umi-android13-
+
+      - name: Clone kernel source
         run: git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git -b umi-t-oss --depth=1 kernel
 
-      - name: 集成 SukiSU-Ultra（builtin 内置模式）
+      - name: Integrate SukiSU builtin
         run: |
           cd kernel
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
-      - name: 追加SukiSU必需配置（全量原厂，零裁剪）
+      - name: Add kernel config for SukiSU
         run: |
           cd kernel
           cat >> arch/arm64/configs/umi_defconfig << EOF
@@ -39,13 +39,13 @@ jobs:
           CONFIG_KALLSYMS_ALL=y
           EOF
 
-      - name: 全量编译内核
+      - name: Build kernel
         run: |
           cd kernel
           make ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" umi_defconfig
           make ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" -j$(nproc)
 
-      - name: 打包 AnyKernel3 卡刷包
+      - name: Pack AnyKernel3 zip
         run: |
           git clone https://github.com/osm0sis/AnyKernel3.git -b master --depth=1 anykernel
           cp kernel/arch/arm64/boot/Image.gz-dtb anykernel/
@@ -55,8 +55,8 @@ jobs:
           sed -i 's/is_slot_device=.*/is_slot_device=1/' anykernel.sh
           zip -r9 SukiSU-umi-Android13-full.zip * -x .git README.md
 
-      - name: 上传编译成品
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SukiSU-小米10-全量卡刷包
+          name: SukiSU-Mi10-Android13
           path: anykernel/SukiSU-umi-Android13-full.zip
