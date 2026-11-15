@@ -19,33 +19,30 @@ jobs:
           sudo apt update
           sudo apt install -y \
             git build-essential bc bison flex \
-            libssl-dev libelf-dev python3 \
-            curl zip unzip ccache \
+            libssl-dev libelf-dev libc6-dev \
+            python3 curl zip unzip ccache \
             gcc-9 g++-9 \
             gcc-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu
           ccache -M 5G
-          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 100 || true
-          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 100 || true
 
-      - name: Clone kernel source
+      - name: Clone kernel
         run: |
           set -ex
           BRANCH="umi-q-oss"
+          rm -rf kernel
           for i in 1 2 3; do
-            rm -rf kernel
             git clone --depth=1 -b "$BRANCH" \
               https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel \
               && break
-            echo "clone retry $i"
+            echo "retry $i"
+            rm -rf kernel
             sleep 5
           done
           test -d kernel
-
           cd kernel
-          echo "===== ALL DEFCONFIG FILES ====="
-          find arch/arm64 -type f \( -iname "*defconfig*" \) | sort
-          echo "================================"
+          echo "==== DEFCONFIGS ===="
+          find arch/arm64 -type f -iname "*defconfig*" | sort
 
       - name: Add SukiSU builtin
         run: |
@@ -55,11 +52,10 @@ jobs:
             "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
             | bash -s builtin
 
-      - name: Fix gcc-wrapper (Python3)
+      - name: Fix gcc-wrapper
         run: |
           set -ex
           cd kernel
-
           if [ -f scripts/gcc-wrapper.py ]; then
             cp scripts/gcc-wrapper.py scripts/gcc-wrapper.py.orig
             cat > scripts/gcc-wrapper.py <<'PY'
@@ -70,65 +66,42 @@ jobs:
             chmod +x scripts/gcc-wrapper.py
           fi
 
-      - name: Detect & prepare defconfig
+      - name: Prepare defconfig
         run: |
           set -ex
           cd kernel
-
           make mrproper || true
 
-          CFG_DIR="arch/arm64/configs"
-          mkdir -p "$CFG_DIR"
+          ROOT="arch/arm64/configs"
+          mkdir -p "$ROOT"
 
-          # 全部候选
-          mapfile -t FILES < <(find arch/arm64 -type f -iname "*defconfig*" | sort)
-          printf "Candidates:\n"
-          printf "%s\n" "${FILES[@]}"
+          # 优先固定小米 10 umi
+          PICK="arch/arm64/configs/vendor/umi_user_defconfig"
+          [ -f "$PICK" ] || \
+            PICK="$(find arch/arm64 -type f -iname '*umi*defconfig' | head -n1)"
+          [ -f "$PICK" ] || \
+            PICK="$(find arch/arm64 -type f -iname '*kona*defconfig' | head -n1)"
+          [ -f "$PICK" ] || \
+            PICK="$(find arch/arm64 -type f -iname '*defconfig' | head -n1)"
 
-          # 优先级：umi -> cmi -> kona -> qcom -> 其它
-          PICK=""
-          for kw in umi cmi kona qcom; do
-            for f in "${FILES[@]}"; do
-              if echo "$f" | grep -qi "$kw"; then
-                PICK="$f"
-                break
-              fi
-            done
-            [ -n "$PICK" ] && break
-          done
+          echo "PICKED: $PICK"
+          test -f "$PICK"
 
-          # 兜底：取第一个
-          if [ -z "$PICK" ] && [ ${#FILES[@]} -gt 0 ]; then
-            PICK="${FILES[0]}"
+          BASE="$(basename "$PICK")"
+          # 已经是 xxx_defconfig，不要再重复拼接
+          TARGET="$BASE"
+
+          # vendor 子目录才复制；同目录不重复 cp
+          if [ "$(dirname "$PICK")" != "$ROOT" ]; then
+            cp -f "$PICK" "$ROOT/$BASE"
           fi
 
-          if [ -z "$PICK" ]; then
-            echo "ERROR: no defconfig found"
-            exit 1
-          fi
+          CFG="$ROOT/$BASE"
+          echo "CONFIG_KPROBES=y" >> "$CFG"
+          echo "CONFIG_KPROBE_EVENTS=y" >> "$CFG"
 
-          BASENAME="$(basename "$PICK")"
-
-          # vendor / 子目录：复制到 configs 根，兼容老 Makefile
-          if [ "$(dirname "$PICK")" != "$CFG_DIR" ]; then
-            cp -f "$PICK" "$CFG_DIR/$BASENAME"
-          fi
-
-          # 去掉后缀，得到 make 目标
-          TARGET="${BASENAME%.defconfig}_defconfig"
-          if [ "$BASENAME" = "defconfig" ]; then
-            TARGET="defconfig"
-          fi
-
-          echo "SELECTED FILE : $PICK"
-          echo "MAKE TARGET   : $TARGET"
           echo "DEFCONFIG_TARGET=$TARGET" >> "$GITHUB_ENV"
-
-          # 追加常用项（重复也无妨，后面 olddefconfig 收敛）
-          MAIN_CFG="$CFG_DIR/$BASENAME"
-          echo "CONFIG_KPM=y" >> "$MAIN_CFG"
-          echo "CONFIG_KALLSYMS=y" >> "$MAIN_CFG"
-          echo "CONFIG_KALLSYMS_ALL=y" >> "$MAIN_CFG"
+          echo "FINAL TARGET: $TARGET"
 
       - name: Build kernel
         run: |
@@ -136,31 +109,31 @@ jobs:
           cd kernel
 
           export ARCH=arm64
+          export SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CC="ccache aarch64-linux-gnu-gcc"
           export HOSTCC=gcc-9
           export HOSTCXX=g++-9
+          export O="$PWD/out"
 
-          echo "Building with: $DEFCONFIG_TARGET"
           make "$DEFCONFIG_TARGET"
           make olddefconfig
-          make -j"$(nproc)"
+          make -j"$(nproc)" KCFLAGS="-Wno-error"
 
       - name: Pack AnyKernel3
         run: |
           set -ex
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
-
           cd kernel
+
           IMAGE=""
           for f in \
+            out/arch/arm64/boot/Image.gz-dtb \
             arch/arm64/boot/Image.gz-dtb \
+            out/arch/arm64/boot/Image.gz \
             arch/arm64/boot/Image.gz \
-            arch/arm64/boot/Image; do
-            if [ -f "$f" ]; then
-              IMAGE="$f"
-              break
-            fi
+            out/arch/arm64/boot/Image; do
+            [ -f "$f" ] && IMAGE="$f" && break
           done
           test -n "$IMAGE"
           cp "$IMAGE" ../ak3/
@@ -169,10 +142,10 @@ jobs:
           sed -i "s/device.name1=.*/device.name1=umi/" anykernel.sh
           sed -i "s/device.name2=.*/device.name2=Mi 10/" anykernel.sh
           sed -i "s/is_slot_device=.*/is_slot_device=1/" anykernel.sh
-          zip -r9 SukiSU-umi-full.zip * -x .git README.md
+          zip -r9 SukiSU-umi.zip * -x .git README.md
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: SukiSU-Mi10
-          path: ak3/SukiSU-umi-full.zip
+          path: ak3/SukiSU-umi.zip
