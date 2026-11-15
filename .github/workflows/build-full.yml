@@ -19,7 +19,7 @@ jobs:
           sudo apt update
           sudo apt install -y \
             git build-essential bc bison flex \
-            libssl-dev libelf-dev python3 python3-pip \
+            libssl-dev libelf-dev python3 \
             curl zip unzip ccache \
             gcc-9 g++-9 \
             gcc-aarch64-linux-gnu \
@@ -40,8 +40,7 @@ jobs:
             sleep 5
           done
           test -d kernel
-          ls -l kernel/arch/arm64/configs/
-          ls -l kernel/arch/arm64/configs/vendor/ || true
+          find kernel/arch/arm64/configs -maxdepth 2 -type f | sort
 
       - name: Add SukiSU builtin
         run: |
@@ -51,28 +50,53 @@ jobs:
             "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
             | bash -s builtin
 
-      - name: Fix Python2 gcc-wrapper
+      - name: Fix gcc-wrapper and Makefile
         run: |
           set -ex
           cd kernel
+
+          # 1) 备份后重写为直通转发，避免 py2 print；同时保留原文件
           if [ -f scripts/gcc-wrapper.py ]; then
-            # 直接禁用 wrapper，避免 py2 报错；备选也可手动把 print 补括号
-            mv scripts/gcc-wrapper.py scripts/gcc-wrapper.py.bak || true
+            cp scripts/gcc-wrapper.py scripts/gcc-wrapper.py.orig
+            cat > scripts/gcc-wrapper.py <<'PY'
+          #!/usr/bin/env python3
+          import sys, subprocess
+          args = sys.argv[1:]
+          sys.exit(subprocess.call(args))
+          PY
+            chmod +x scripts/gcc-wrapper.py
           fi
+
+          # 2) 扫描并注释掉强制把 CC 指向 wrapper 的地方
+          grep -RIn "gcc-wrapper.py" Makefile scripts 2>/dev/null || true
+          sed -i \
+            -e 's|^\(.*gcc-wrapper\.py.*\)|# \1|' \
+            Makefile 2>/dev/null || true
+          find scripts -maxdepth 3 -name "Makefile*" -print0 \
+            | while IFS= read -r -d '' f; do
+                sed -i \
+                  -e 's|^\(.*gcc-wrapper\.py.*\)|# \1|' \
+                  "$f"
+              done
 
       - name: Patch defconfig
         run: |
           set -ex
           cd kernel
+
           if [ -f arch/arm64/configs/vendor/kona_defconfig ]; then
             DEFCONFIG="arch/arm64/configs/vendor/kona_defconfig"
+          elif [ -f arch/arm64/configs/kona_defconfig ]; then
+            DEFCONFIG="arch/arm64/configs/kona_defconfig"
           else
             DEFCONFIG="arch/arm64/configs/umi_defconfig"
           fi
+
+          echo "USE DEFCONFIG: $DEFCONFIG"
+          test -f "$DEFCONFIG"
           echo "CONFIG_KPM=y" >> "$DEFCONFIG"
           echo "CONFIG_KALLSYMS=y" >> "$DEFCONFIG"
           echo "CONFIG_KALLSYMS_ALL=y" >> "$DEFCONFIG"
-          echo "USE KONA DEFCONFIG: $DEFCONFIG"
 
       - name: Build kernel
         run: |
@@ -81,10 +105,14 @@ jobs:
 
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export CC="ccache gcc"
+          # 目标编译器：ccache + 交叉 gcc；主机编译器单独给 HOSTCC
+          export CC="ccache aarch64-linux-gnu-gcc"
           export HOSTCC=gcc-9
+          export HOSTCXX=g++-9
 
           if [ -f arch/arm64/configs/vendor/kona_defconfig ]; then
+            make kona_defconfig
+          elif [ -f arch/arm64/configs/kona_defconfig ]; then
             make kona_defconfig
           else
             make umi_defconfig
