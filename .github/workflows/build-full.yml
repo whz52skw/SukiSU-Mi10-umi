@@ -1,4 +1,5 @@
-name: Mi10-umi SukiSU Kernel Build
+name: Mi10 SukiSU Kernel Build
+
 on:
   workflow_dispatch:
   push:
@@ -6,57 +7,72 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
     steps:
-      - name: Install build dependencies
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
         run: |
+          set -ex
           sudo apt update
-          sudo apt install -y git build-essential bc bison flex libssl-dev libelf-dev python3 curl zip unzip gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu ccache
+          sudo apt install -y \
+            git build-essential bc bison flex \
+            libssl-dev libelf-dev python3 curl zip unzip \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu ccache
           ccache -M 5G
 
-      - name: Cache ccache
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          key: ccache-umi-android13-${{ github.run_id }}
-          restore-keys: |
-            ccache-umi-android13-
-
       - name: Clone kernel source
-        run: git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git -b umi-t-oss --depth=1 kernel
-
-      - name: Integrate SukiSU builtin
         run: |
-          cd kernel
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+          set -ex
+          # 先打印可用分支，确认后再改 -b
+          git ls-remote --heads https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git | grep -i umi || true
+          for i in 1 2 3; do
+            git clone --depth=1 \
+              -b 这里换成确认存在的真实分支 \
+              https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel && break
+            echo "clone retry $i"
+            sleep 5
+          done
+          test -d kernel
 
-      - name: Add kernel config for SukiSU
+      - name: Add SukiSU builtin
         run: |
+          set -ex
           cd kernel
-          cat >> arch/arm64/configs/umi_defconfig << EOF
-          CONFIG_KPM=y
-          CONFIG_KALLSYMS=y
-          CONFIG_KALLSYMS_ALL=y
-          EOF
+          curl -LSs \
+            "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
+            | bash -s builtin
+
+      - name: Patch defconfig
+        run: |
+          set -ex
+          cd kernel
+          echo "CONFIG_KPM=y" >> arch/arm64/configs/umi_defconfig
+          echo "CONFIG_KALLSYMS=y" >> arch/arm64/configs/umi_defconfig
+          echo "CONFIG_KALLSYMS_ALL=y" >> arch/arm64/configs/umi_defconfig
 
       - name: Build kernel
         run: |
+          set -ex
           cd kernel
           make ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" umi_defconfig
           make ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" -j$(nproc)
 
-      - name: Pack AnyKernel3 zip
+      - name: Pack AnyKernel3
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3.git -b master --depth=1 anykernel
-          cp kernel/arch/arm64/boot/Image.gz-dtb anykernel/
-          cd anykernel
-          sed -i 's/device.name1=.*/device.name1=umi/' anykernel.sh
-          sed -i 's/device.name2=.*/device.name2=Mi 10/' anykernel.sh
-          sed -i 's/is_slot_device=.*/is_slot_device=1/' anykernel.sh
-          zip -r9 SukiSU-umi-Android13-full.zip * -x .git README.md
+          set -ex
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
+          cp kernel/arch/arm64/boot/Image.gz-dtb ak3/
+          cd ak3
+          sed -i "s/device.name1=.*/device.name1=umi/" anykernel.sh
+          sed -i "s/device.name2=.*/device.name2=Mi 10/" anykernel.sh
+          sed -i "s/is_slot_device=.*/is_slot_device=1/" anykernel.sh
+          zip -r9 SukiSU-umi-full.zip * -x .git README.md
 
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: SukiSU-Mi10-Android13
-          path: anykernel/SukiSU-umi-Android13-full.zip
+          name: SukiSU-Mi10
+          path: ak3/SukiSU-umi-full.zip
